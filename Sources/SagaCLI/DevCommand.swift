@@ -117,19 +117,9 @@ struct Dev: ParsableCommand {
     env["SAGA_DEV"] = "1"
     process.environment = env
 
-    let pipe = Pipe()
-    process.standardOutput = pipe
-    process.standardError = pipe
-
     do {
       try process.run()
       process.waitUntilExit()
-
-      let data = pipe.fileHandleForReading.readDataToEndOfFile()
-      if let output = String(data: data, encoding: .utf8), !output.isEmpty {
-        print(output, terminator: "")
-      }
-
       return process.terminationStatus == 0
     } catch {
       print("Build error: \(error)")
