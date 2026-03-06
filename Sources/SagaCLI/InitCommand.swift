@@ -26,7 +26,7 @@ struct Init: ParsableCommand {
     // Write files
     let files: [(Path, String)] = [
       (projectPath + "Package.swift", ProjectTemplate.packageSwift(name: capitalizedName)),
-      (projectPath + "Sources" + capitalizedName + "run.swift", ProjectTemplate.runSwift(name: capitalizedName)),
+      (projectPath + "Sources" + capitalizedName + "main.swift", ProjectTemplate.mainSwift(name: capitalizedName)),
       (projectPath + "Sources" + capitalizedName + "templates.swift", ProjectTemplate.templatesSwift()),
       (projectPath + "content" + "index.md", ProjectTemplate.indexMarkdown()),
       (projectPath + "content" + "articles" + "hello-world.md", ProjectTemplate.helloWorldMarkdown()),

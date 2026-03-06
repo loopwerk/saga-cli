@@ -33,7 +33,7 @@ enum ProjectTemplate {
     """
   }
 
-  static func runSwift(name: String) -> String {
+  static func mainSwift(name: String) -> String {
     """
     import Foundation
     import Saga
@@ -45,28 +45,23 @@ enum ProjectTemplate {
       var summary: String?
     }
 
-    @main
-    struct Run {
-      static func main() async throws {
-        try await Saga(input: "content", output: "deploy")
-          .register(
-            folder: "articles",
-            metadata: ArticleMetadata.self,
-            readers: [.parsleyMarkdownReader],
-            writers: [
-              .itemWriter(swim(renderArticle)),
-              .listWriter(swim(renderArticles)),
-              .tagWriter(swim(renderTag), tags: \\.metadata.tags),
-            ]
-          )
-          .register(
-            metadata: EmptyMetadata.self,
-            readers: [.parsleyMarkdownReader],
-            writers: [.itemWriter(swim(renderPage))]
-          )
-          .run()
-      }
-    }
+    try await Saga(input: "content", output: "deploy")
+      .register(
+        folder: "articles",
+        metadata: ArticleMetadata.self,
+        readers: [.parsleyMarkdownReader],
+        writers: [
+          .itemWriter(swim(renderArticle)),
+          .listWriter(swim(renderArticles)),
+          .tagWriter(swim(renderTag), tags: \\.metadata.tags),
+        ]
+      )
+      .register(
+        metadata: EmptyMetadata.self,
+        readers: [.parsleyMarkdownReader],
+        writers: [.itemWriter(swim(renderPage))]
+      )
+      .run()
     """
   }
 
