@@ -3,7 +3,7 @@ import Foundation
 enum ProjectTemplate {
   static func packageSwift(name: String) -> String {
     """
-    // swift-tools-version:5.5
+    // swift-tools-version:6.0
 
     import PackageDescription
 

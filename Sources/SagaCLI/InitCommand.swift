@@ -1,5 +1,5 @@
 import ArgumentParser
-import PathKit
+import SagaPathKit
 
 struct Init: ParsableCommand {
   static let configuration = CommandConfiguration(

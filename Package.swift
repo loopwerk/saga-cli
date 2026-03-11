@@ -11,7 +11,7 @@ let package = Package(
     .executable(name: "saga", targets: ["SagaCLI"]),
   ],
   dependencies: [
-    .package(url: "https://github.com/kylef/PathKit", from: "1.0.1"),
+    .package(url: "https://github.com/loopwerk/SagaPathKit", from: "1.4.0"),
     .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
     .package(url: "https://github.com/apple/swift-nio", from: "2.65.0"),
   ],
@@ -19,7 +19,7 @@ let package = Package(
     .executableTarget(
       name: "SagaCLI",
       dependencies: [
-        "PathKit",
+        "SagaPathKit",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
         .product(name: "NIOCore", package: "swift-nio"),
         .product(name: "NIOPosix", package: "swift-nio"),
