@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import SagaPathKit
 
 struct Dev: ParsableCommand {
   static let configuration = CommandConfiguration(
@@ -19,8 +20,15 @@ struct Dev: ParsableCommand {
   var ignore: [String] = []
 
   func run() throws {
+    // Create a fresh cache directory for this dev session
+    let cachePath = Path.current + ".build/saga-cache"
+    if cachePath.exists {
+      try cachePath.delete()
+    }
+    try cachePath.mkpath()
+
     print("Building site...")
-    let buildResult = runBuild()
+    let buildResult = runBuild(cachePath: cachePath)
     if !buildResult {
       print("Initial build failed, starting server anyway...")
     }
@@ -74,7 +82,7 @@ struct Dev: ParsableCommand {
       rebuildLock.unlock()
 
       print("Change detected, rebuilding...")
-      let success = runBuild()
+      let success = runBuild(cachePath: cachePath)
       if success {
         print("Rebuild complete.")
         server.sendReload()
@@ -107,7 +115,7 @@ struct Dev: ParsableCommand {
     }
   }
 
-  private func runBuild() -> Bool {
+  private func runBuild(cachePath: Path) -> Bool {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
     process.arguments = ["swift", "run"]
@@ -115,6 +123,7 @@ struct Dev: ParsableCommand {
 
     var env = ProcessInfo.processInfo.environment
     env["SAGA_DEV"] = "1"
+    env["SAGA_CACHE_DIR"] = cachePath.string
     process.environment = env
 
     do {

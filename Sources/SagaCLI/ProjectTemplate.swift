@@ -339,6 +339,16 @@ enum ProjectTemplate {
     """
   }
 
+  static func gitignore() -> String {
+    """
+    .DS_Store
+    .build/
+    .swiftpm/
+    *.xcodeproj
+    xcuserdata/
+    """
+  }
+
   private static func currentDateString() -> String {
     let formatter = DateFormatter()
     formatter.dateFormat = "yyyy-MM-dd"
