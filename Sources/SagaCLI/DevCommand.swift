@@ -27,10 +27,37 @@ struct Dev: ParsableCommand {
     }
     try cachePath.mkpath()
 
-    print("Building site...")
-    let buildResult = runBuild(cachePath: cachePath)
-    if !buildResult {
-      print("Initial build failed, starting server anyway...")
+    // Find the executable product name from Package.swift
+    guard let productName = findExecutableProduct() else {
+      print("Could not find an executable product in Package.swift")
+      throw ExitCode.failure
+    }
+
+    // Initial build
+    log("Building site...")
+    guard swiftBuild() else {
+      log("Initial build failed.")
+      throw ExitCode.failure
+    }
+
+    // Set up SIGUSR2 handler — the site process signals us when a build completes
+    let buildComplete = DispatchSemaphore(value: 0)
+    signal(SIGUSR2, SIG_IGN)
+    let sigusr2Source = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: DispatchQueue(label: "Saga.Signal"))
+    sigusr2Source.setEventHandler { buildComplete.signal() }
+    sigusr2Source.resume()
+
+    // Launch the site process (stays alive, waiting for SIGUSR1 between rebuilds)
+    var siteProcess = launchSiteProcess(productName: productName, cachePath: cachePath)
+    if let siteProcess {
+      // Wait for the initial build to finish
+      buildComplete.wait()
+      guard siteProcess.isRunning else {
+        log("Initial build failed.")
+        throw ExitCode.failure
+      }
+    } else {
+      log("Failed to launch site process, starting server anyway...")
     }
 
     // Start the dev server
@@ -48,7 +75,7 @@ struct Dev: ParsableCommand {
 
     // Give the server a moment to start
     Thread.sleep(forTimeInterval: 0.5)
-    print("Development server running at http://localhost:\(port)/")
+    log("Development server running at http://localhost:\(port)/")
 
     // Open the browser
     openBrowser(url: "http://localhost:\(port)/")
@@ -66,13 +93,13 @@ struct Dev: ParsableCommand {
 
     // Start monitoring
     if !ignore.isEmpty {
-      print("Ignoring patterns: \(ignore.joined(separator: ", "))")
+      log("Ignoring patterns: \(ignore.joined(separator: ", "))")
     }
 
     var isRebuilding = false
     let rebuildLock = NSLock()
 
-    let folderMonitor = FolderMonitor(paths: paths, ignoredPatterns: defaultIgnorePatterns + ignore) {
+    let folderMonitor = FolderMonitor(paths: paths, ignoredPatterns: defaultIgnorePatterns + ignore) { changedPaths in
       rebuildLock.lock()
       guard !isRebuilding else {
         rebuildLock.unlock()
@@ -81,13 +108,39 @@ struct Dev: ParsableCommand {
       isRebuilding = true
       rebuildLock.unlock()
 
-      print("Change detected, rebuilding...")
-      let success = runBuild(cachePath: cachePath)
-      if success {
-        print("Rebuild complete.")
+      if changedPaths.contains(where: { $0.hasSuffix(".swift") }) {
+        // Swift code changed: kill the process, recompile, relaunch
+        log("Source code changed, recompiling...")
+        siteProcess?.terminate()
+        siteProcess?.waitUntilExit()
+
+        guard swiftBuild() else {
+          log("Build failed")
+          rebuildLock.lock()
+          isRebuilding = false
+          rebuildLock.unlock()
+          return
+        }
+
+        siteProcess = launchSiteProcess(productName: productName, cachePath: cachePath)
+      } else {
+        // Content changed: signal the running process to rebuild
+        log("Change detected, rebuilding...")
+        if let process = siteProcess, process.isRunning {
+          kill(process.processIdentifier, SIGUSR1)
+        } else {
+          // Process died, relaunch
+          siteProcess = launchSiteProcess(productName: productName, cachePath: cachePath)
+        }
+      }
+
+      // Wait for the site process to signal build completion
+      buildComplete.wait()
+
+      if let process = siteProcess, process.isRunning {
         server.sendReload()
       } else {
-        print("Rebuild failed.")
+        log("Rebuild failed")
       }
 
       rebuildLock.lock()
@@ -100,50 +153,19 @@ struct Dev: ParsableCommand {
     let sigintSrc = DispatchSource.makeSignalSource(signal: SIGINT, queue: signalsQueue)
     sigintSrc.setEventHandler {
       print("\nShutting down...")
+      siteProcess?.terminate()
       server.stop()
       Foundation.exit(0)
     }
     sigintSrc.resume()
     signal(SIGINT, SIG_IGN)
 
-    print("Watching for changes in: \(watch.joined(separator: ", "))")
+    log("Watching for changes in: \(watch.joined(separator: ", "))")
 
     // Prevent folderMonitor from being deallocated
     withExtendedLifetime(folderMonitor) {
       // Keep running
       dispatchMain()
     }
-  }
-
-  private func runBuild(cachePath: Path) -> Bool {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-    process.arguments = ["swift", "run"]
-    process.currentDirectoryURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-
-    var env = ProcessInfo.processInfo.environment
-    env["SAGA_DEV"] = "1"
-    env["SAGA_CACHE_DIR"] = cachePath.string
-    process.environment = env
-
-    do {
-      try process.run()
-      process.waitUntilExit()
-      return process.terminationStatus == 0
-    } catch {
-      print("Build error: \(error)")
-      return false
-    }
-  }
-
-  private func openBrowser(url: String) {
-    #if os(macOS)
-      Process.launchedProcess(launchPath: "/usr/bin/open", arguments: [url])
-    #elseif os(Linux)
-      let process = Process()
-      process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-      process.arguments = ["xdg-open", url]
-      try? process.run()
-    #endif
   }
 }

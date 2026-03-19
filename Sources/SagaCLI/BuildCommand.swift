@@ -7,7 +7,7 @@ struct Build: ParsableCommand {
   )
 
   func run() throws {
-    print("Building site...")
+    log("Building site...")
 
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -17,7 +17,7 @@ struct Build: ParsableCommand {
     process.waitUntilExit()
 
     if process.terminationStatus == 0 {
-      print("Build complete.")
+      log("Build complete.")
     } else {
       throw ExitCode(process.terminationStatus)
     }

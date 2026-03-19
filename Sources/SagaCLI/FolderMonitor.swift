@@ -1,14 +1,14 @@
 import Foundation
 
 class FolderMonitor {
-  private let callback: () -> Void
+  private let callback: (Set<String>) -> Void
   private let ignoredPatterns: [String]
   private let basePath: String
   private let paths: [String]
   private var knownFiles: [String: Date] = [:]
   private var timer: DispatchSourceTimer?
 
-  init(paths: [String], ignoredPatterns: [String] = [], folderDidChange: @escaping () -> Void) {
+  init(paths: [String], ignoredPatterns: [String] = [], folderDidChange: @escaping (Set<String>) -> Void) {
     self.paths = paths
     callback = folderDidChange
     self.ignoredPatterns = ignoredPatterns
@@ -30,35 +30,30 @@ class FolderMonitor {
   private func checkForChanges() {
     let currentFiles = scanFiles()
 
-    var changed = false
+    var changedPaths: Set<String> = []
 
     // Check for new or modified files
     for (path, modDate) in currentFiles {
       if let previousDate = knownFiles[path] {
         if modDate > previousDate {
-          changed = true
-          break
+          changedPaths.insert(path)
         }
       } else {
         // New file
-        changed = true
-        break
+        changedPaths.insert(path)
       }
     }
 
     // Check for deleted files
-    if !changed {
-      for path in knownFiles.keys {
-        if currentFiles[path] == nil {
-          changed = true
-          break
-        }
+    for path in knownFiles.keys {
+      if currentFiles[path] == nil {
+        changedPaths.insert(path)
       }
     }
 
-    if changed {
+    if !changedPaths.isEmpty {
       knownFiles = currentFiles
-      callback()
+      callback(changedPaths)
     }
   }
 
