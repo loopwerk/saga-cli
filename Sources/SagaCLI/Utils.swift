@@ -1,6 +1,20 @@
 import Foundation
 import SagaPathKit
 
+struct SagaConfig: Codable {
+  let input: String
+  let output: String
+}
+
+/// Read the config file written by Saga at `.build/saga-config.json`.
+func readSagaConfig() -> SagaConfig? {
+  let configPath = Path.current + ".build/saga-config.json"
+  guard let data = try? Data(contentsOf: URL(fileURLWithPath: configPath.string)) else {
+    return nil
+  }
+  return try? JSONDecoder().decode(SagaConfig.self, from: data)
+}
+
 private let logDateFormatter: DateFormatter = {
   let f = DateFormatter()
   f.dateFormat = "yyyy-MM-dd HH:mm:ss"
@@ -66,7 +80,7 @@ func swiftBuild() -> Bool {
   process.arguments = ["swift", "build"]
   process.currentDirectoryURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
   process.environment = ProcessInfo.processInfo.environment
-  
+
   do {
     try process.run()
     process.waitUntilExit()
@@ -86,8 +100,8 @@ func launchSiteProcess(productName: String, cachePath: Path) -> Process? {
 
   var env = ProcessInfo.processInfo.environment
   env["SAGA_DEV"] = "1"
+  env["SAGA_CLI"] = "2"
   env["SAGA_CACHE_DIR"] = cachePath.string
-  env["SAGA_DEV_PID"] = "\(ProcessInfo.processInfo.processIdentifier)"
   process.environment = env
 
   do {

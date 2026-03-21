@@ -18,6 +18,14 @@ $ brew install loopwerk/tap/saga
 $ mint install loopwerk/saga-cli
 ```
 
+**From source:**
+
+```shell-session
+$ git clone https://github.com/loopwerk/saga-cli.git
+$ cd saga-cli
+$ swift package experimental-install
+```
+
 > **Migrating from an older version?** The CLI previously lived inside the [Saga](https://github.com/loopwerk/Saga) repository. If you installed via Mint using `mint install loopwerk/Saga`, switch to `mint install loopwerk/saga-cli`.
 
 ## Commands
@@ -44,30 +52,18 @@ $ saga build
 
 ### `saga dev`
 
-Start a development server with file watching and auto-reload:
+Start a development server with auto-reload on port 3000:
 
 ```
 $ saga dev
+$ saga dev --port 8080
 ```
 
-Options:
-
-| Flag             | Default              | Description                                    |
-| ---------------- | -------------------- | ---------------------------------------------- |
-| `--watch`, `-w`  | `content`, `Sources` | Folders to watch for changes (repeatable)      |
-| `--output`, `-o` | `deploy`             | Output folder for the built site               |
-| `--port`, `-p`   | `3000`               | Port for the development server                |
-| `--ignore`, `-i` |                      | Glob patterns for files to ignore (repeatable) |
-
-Example with custom options:
-
-```
-$ saga dev --watch content --watch Sources --output deploy --port 8080 --ignore "*.tmp" --ignore "drafts/*"
-```
+> **Note:** saga-cli 2.x requires Saga 3.x or later.
 
 ## Requirements
 
-Swift 5.5+ and macOS 12+.
+Swift 6.0+ and macOS 14+ or Linux.
 
 ## License
 

@@ -3,7 +3,7 @@ import NIOCore
 import NIOHTTP1
 import NIOPosix
 
-final class DevServer {
+final class DevServer: @unchecked Sendable {
   private let outputPath: String
   private let port: Int
   private let group: MultiThreadedEventLoopGroup
@@ -73,7 +73,7 @@ final class SSEConnectionStore: @unchecked Sendable {
   }
 }
 
-private final class HTTPHandler: ChannelInboundHandler {
+private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
   typealias InboundIn = HTTPServerRequestPart
   typealias OutboundOut = HTTPServerResponsePart
 
@@ -152,10 +152,11 @@ private final class HTTPHandler: ChannelInboundHandler {
     let head = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
     context.writeAndFlush(wrapOutboundOut(.head(head)), promise: nil)
 
-    sseConnections.add(context.channel)
+    let channel = context.channel
+    sseConnections.add(channel)
 
-    context.channel.closeFuture.whenComplete { [weak self] _ in
-      self?.sseConnections.remove(context.channel)
+    channel.closeFuture.whenComplete { [weak self] _ in
+      self?.sseConnections.remove(channel)
     }
   }
 

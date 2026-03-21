@@ -7,17 +7,8 @@ struct Dev: ParsableCommand {
     abstract: "Build, watch for changes, and serve the site with auto-reload."
   )
 
-  @Option(name: .shortAndLong, help: "Folder to watch for changes. Can be specified multiple times.")
-  var watch: [String] = ["content", "Sources"]
-
-  @Option(name: .shortAndLong, help: "Output folder for the built site.")
-  var output: String = "deploy"
-
   @Option(name: .shortAndLong, help: "Port for the development server.")
   var port: Int = 3000
-
-  @Option(name: .shortAndLong, help: "Glob pattern for files to ignore. Can be specified multiple times.")
-  var ignore: [String] = []
 
   func run() throws {
     // Create a fresh cache directory for this dev session
@@ -40,33 +31,66 @@ struct Dev: ParsableCommand {
       throw ExitCode.failure
     }
 
-    // Set up SIGUSR2 handler — the site process signals us when a build completes
-    let buildComplete = DispatchSemaphore(value: 0)
+    let coordinator = DevCoordinator(productName: productName, cachePath: cachePath, port: port)
+    try coordinator.start()
+  }
+}
+
+/// Manages the dev server lifecycle: site process, HTTP server, signal handling.
+private final class DevCoordinator: @unchecked Sendable {
+  let productName: String
+  let cachePath: Path
+  let port: Int
+  var siteProcess: Process?
+  var server: DevServer?
+
+  init(productName: String, cachePath: Path, port: Int) {
+    self.productName = productName
+    self.cachePath = cachePath
+    self.port = port
+  }
+
+  func start() throws {
+    // Set up SIGUSR2 handler — Saga signals us when a build completes so we can reload browsers
     signal(SIGUSR2, SIG_IGN)
     let sigusr2Source = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: DispatchQueue(label: "Saga.Signal"))
-    sigusr2Source.setEventHandler { buildComplete.signal() }
+    sigusr2Source.setEventHandler { [weak self] in self?.server?.sendReload() }
     sigusr2Source.resume()
 
-    // Launch the site process (stays alive, waiting for SIGUSR1 between rebuilds)
-    var siteProcess = launchSiteProcess(productName: productName, cachePath: cachePath)
-    if let siteProcess {
-      // Wait for the initial build to finish
-      buildComplete.wait()
-      guard siteProcess.isRunning else {
-        log("Initial build failed.")
-        throw ExitCode.failure
-      }
-    } else {
-      log("Failed to launch site process, starting server anyway...")
+    // Launch the site process. Saga watches its own files and rebuilds internally.
+    // Exit code 42 means "Swift source changed, recompile me".
+    siteProcess = launchSiteProcess(productName: productName, cachePath: cachePath)
+    guard siteProcess != nil else {
+      log("Failed to launch site process.")
+      throw ExitCode.failure
+    }
+
+    // Wait for the initial build to complete (SIGUSR2 or process exit)
+    let initialBuild = DispatchSemaphore(value: 0)
+    siteProcess?.terminationHandler = { _ in initialBuild.signal() }
+    let initialSigusr2 = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: DispatchQueue(label: "Saga.InitialBuild"))
+    initialSigusr2.setEventHandler { initialBuild.signal() }
+    initialSigusr2.resume()
+    initialBuild.wait()
+    initialSigusr2.cancel()
+    siteProcess?.terminationHandler = nil
+
+    // Read the config file written by Saga to detect output path.
+    // If the config file doesn't exist, this is a Saga 2 site which is not supported.
+    guard let config = readSagaConfig() else {
+      log("This version of saga-cli requires Saga 3.x or later.")
+      siteProcess?.terminate()
+      throw ExitCode.failure
     }
 
     // Start the dev server
-    let server = DevServer(outputPath: output, port: port)
+    let devServer = DevServer(outputPath: config.output, port: port)
+    server = devServer
 
     let serverQueue = DispatchQueue(label: "Saga.DevServer")
     serverQueue.async {
       do {
-        try server.start()
+        try devServer.start()
       } catch {
         print("Failed to start server: \(error)")
         Foundation.exit(1)
@@ -80,92 +104,41 @@ struct Dev: ParsableCommand {
     // Open the browser
     openBrowser(url: "http://localhost:\(port)/")
 
-    // Turn watch folders into full paths
-    let currentPath = FileManager.default.currentDirectoryPath
-    let paths = watch.map { folder -> String in
-      if folder.hasPrefix("/") {
-        return folder
-      }
-      return currentPath + "/" + folder
-    }
-
-    let defaultIgnorePatterns = [".DS_Store"]
-
-    // Start monitoring
-    if !ignore.isEmpty {
-      log("Ignoring patterns: \(ignore.joined(separator: ", "))")
-    }
-
-    var isRebuilding = false
-    let rebuildLock = NSLock()
-
-    let folderMonitor = FolderMonitor(paths: paths, ignoredPatterns: defaultIgnorePatterns + ignore) { changedPaths in
-      rebuildLock.lock()
-      guard !isRebuilding else {
-        rebuildLock.unlock()
-        return
-      }
-      isRebuilding = true
-      rebuildLock.unlock()
-
-      if changedPaths.contains(where: { $0.hasSuffix(".swift") }) {
-        // Swift code changed: kill the process, recompile, relaunch
-        log("Source code changed, recompiling...")
-        siteProcess?.terminate()
-        siteProcess?.waitUntilExit()
-
-        guard swiftBuild() else {
-          log("Build failed")
-          rebuildLock.lock()
-          isRebuilding = false
-          rebuildLock.unlock()
-          return
-        }
-
-        siteProcess = launchSiteProcess(productName: productName, cachePath: cachePath)
-      } else {
-        // Content changed: signal the running process to rebuild
-        log("Change detected, rebuilding...")
-        if let process = siteProcess, process.isRunning {
-          kill(process.processIdentifier, SIGUSR1)
-        } else {
-          // Process died, relaunch
-          siteProcess = launchSiteProcess(productName: productName, cachePath: cachePath)
-        }
-      }
-
-      // Wait for the site process to signal build completion
-      buildComplete.wait()
-
-      if let process = siteProcess, process.isRunning {
-        server.sendReload()
-      } else {
-        log("Rebuild failed")
-      }
-
-      rebuildLock.lock()
-      isRebuilding = false
-      rebuildLock.unlock()
-    }
-
     // Handle Ctrl+C shutdown
-    let signalsQueue = DispatchQueue(label: "Saga.Signals")
-    let sigintSrc = DispatchSource.makeSignalSource(signal: SIGINT, queue: signalsQueue)
-    sigintSrc.setEventHandler {
+    let sigintSrc = DispatchSource.makeSignalSource(signal: SIGINT, queue: DispatchQueue(label: "Saga.Signals"))
+    sigintSrc.setEventHandler { [weak self] in
       print("\nShutting down...")
-      siteProcess?.terminate()
-      server.stop()
+      self?.siteProcess?.terminate()
+      self?.server?.stop()
       Foundation.exit(0)
     }
     sigintSrc.resume()
     signal(SIGINT, SIG_IGN)
 
-    log("Watching for changes in: \(watch.joined(separator: ", "))")
+    // Watch for process exits. Exit code 42 = Swift source changed, recompile and relaunch.
+    if let process = siteProcess {
+      watchProcess(process)
+    }
 
-    // Prevent folderMonitor from being deallocated
-    withExtendedLifetime(folderMonitor) {
-      // Keep running
+    withExtendedLifetime((sigusr2Source, sigintSrc)) {
       dispatchMain()
+    }
+  }
+
+  func watchProcess(_ process: Process) {
+    process.terminationHandler = { [weak self] terminatedProcess in
+      guard let self, terminatedProcess.terminationStatus == 42 else { return }
+
+      log("Source code changed, recompiling...")
+      guard swiftBuild() else {
+        log("Build failed")
+        return
+      }
+
+      self.siteProcess = launchSiteProcess(productName: self.productName, cachePath: self.cachePath)
+      if let newProcess = self.siteProcess {
+        self.watchProcess(newProcess)
+      }
     }
   }
 }
