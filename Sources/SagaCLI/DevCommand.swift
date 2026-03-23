@@ -51,14 +51,19 @@ private final class DevCoordinator: @unchecked Sendable {
   }
 
   func start() throws {
-    // Set up SIGUSR2 handler — Saga signals us when a build completes so we can reload browsers
+    // Set up SIGUSR2 handler — Saga signals us when a content rebuild completes so we can reload browsers
     signal(SIGUSR2, SIG_IGN)
     let sigusr2Source = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: DispatchQueue(label: "Saga.Signal"))
     sigusr2Source.setEventHandler { [weak self] in self?.server?.sendReload() }
     sigusr2Source.resume()
 
+    // Set up SIGUSR1 handler — Saga signals us when Swift source files change so we can recompile
+    signal(SIGUSR1, SIG_IGN)
+    let sigusr1Source = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: DispatchQueue(label: "Saga.Recompile"))
+    sigusr1Source.setEventHandler { [weak self] in self?.recompileAndRelaunch() }
+    sigusr1Source.resume()
+
     // Launch the site process. Saga watches its own files and rebuilds internally.
-    // Exit code 42 means "Swift source changed, recompile me".
     siteProcess = launchSiteProcess(productName: productName, cachePath: cachePath)
     guard siteProcess != nil else {
       log("Failed to launch site process.")
@@ -115,30 +120,22 @@ private final class DevCoordinator: @unchecked Sendable {
     sigintSrc.resume()
     signal(SIGINT, SIG_IGN)
 
-    // Watch for process exits. Exit code 42 = Swift source changed, recompile and relaunch.
-    if let process = siteProcess {
-      watchProcess(process)
-    }
-
-    withExtendedLifetime((sigusr2Source, sigintSrc)) {
+    withExtendedLifetime((sigusr1Source, sigusr2Source, sigintSrc)) {
       dispatchMain()
     }
   }
 
-  func watchProcess(_ process: Process) {
-    process.terminationHandler = { [weak self] terminatedProcess in
-      guard let self, terminatedProcess.terminationStatus == 42 else { return }
-
-      log("Source code changed, recompiling...")
-      guard swiftBuild() else {
-        log("Build failed")
-        return
-      }
-
-      self.siteProcess = launchSiteProcess(productName: self.productName, cachePath: self.cachePath)
-      if let newProcess = self.siteProcess {
-        self.watchProcess(newProcess)
-      }
+  func recompileAndRelaunch() {
+    log("Source code changed, recompiling...")
+    guard swiftBuild() else {
+      log("Build failed, waiting for next change...")
+      return
     }
+
+    // Build succeeded — kill old process and launch new one
+    siteProcess?.terminate()
+    siteProcess?.waitUntilExit()
+
+    siteProcess = launchSiteProcess(productName: productName, cachePath: cachePath)
   }
 }
