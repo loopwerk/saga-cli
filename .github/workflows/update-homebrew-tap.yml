@@ -1,0 +1,22 @@
+name: Trigger GetSaga.dev update
+
+on:
+  push:
+    tags:
+      - "*"
+
+jobs:
+  update-homebrew-tap:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Dispatch to homebrew-tap
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          repository: loopwerk/homebrew-tap
+          event-type: update-saga-tap
+          client-payload: |
+            {
+              "version": "${{ github.ref_name }}"
+            }
