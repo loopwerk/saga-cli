@@ -51,6 +51,9 @@ private final class DevCoordinator: @unchecked Sendable {
   }
 
   func start() throws {
+    // Recompile and shutdown both mutate siteProcess, so they must share one queue.
+    let lifecycleQueue = DispatchQueue(label: "Saga.Lifecycle")
+
     // Set up SIGUSR2 handler — Saga signals us when a content rebuild completes so we can reload browsers
     signal(SIGUSR2, SIG_IGN)
     let sigusr2Source = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: DispatchQueue(label: "Saga.Signal"))
@@ -59,7 +62,7 @@ private final class DevCoordinator: @unchecked Sendable {
 
     // Set up SIGUSR1 handler — Saga signals us when Swift source files change so we can recompile
     signal(SIGUSR1, SIG_IGN)
-    let sigusr1Source = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: DispatchQueue(label: "Saga.Recompile"))
+    let sigusr1Source = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: lifecycleQueue)
     sigusr1Source.setEventHandler { [weak self] in self?.recompileAndRelaunch() }
     sigusr1Source.resume()
 
@@ -110,10 +113,13 @@ private final class DevCoordinator: @unchecked Sendable {
     openBrowser(url: "http://localhost:\(port)/")
 
     // Handle Ctrl+C shutdown
-    let sigintSrc = DispatchSource.makeSignalSource(signal: SIGINT, queue: DispatchQueue(label: "Saga.Signals"))
+    let sigintSrc = DispatchSource.makeSignalSource(signal: SIGINT, queue: lifecycleQueue)
     sigintSrc.setEventHandler { [weak self] in
       print("\nShutting down...")
-      self?.siteProcess?.terminate()
+      if let siteProcess = self?.siteProcess, siteProcess.isRunning {
+        siteProcess.terminate()
+        siteProcess.waitUntilExit()
+      }
       self?.server?.stop()
       Foundation.exit(0)
     }
