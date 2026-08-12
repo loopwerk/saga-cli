@@ -26,7 +26,8 @@ func log(_ message: String) {
 }
 
 /// Find the first executable product name using `swift package dump-package`.
-func findExecutableProduct() -> String? {
+/// `onStart` receives the process, so callers can interrupt it.
+func findExecutableProduct(onStart: ((Process) -> Void)? = nil) -> String? {
   let process = Process()
   process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
   process.arguments = ["swift", "package", "dump-package"]
@@ -38,6 +39,7 @@ func findExecutableProduct() -> String? {
 
   do {
     try process.run()
+    onStart?(process)
     process.waitUntilExit()
     guard process.terminationStatus == 0 else { return nil }
 

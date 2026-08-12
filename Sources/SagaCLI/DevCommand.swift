@@ -19,30 +19,19 @@ struct Dev: ParsableCommand {
     }
     try cachePath.mkpath()
 
-    // Find the executable product name from Package.swift
-    guard let productName = findExecutableProduct() else {
-      print("Could not find an executable product in Package.swift")
-      throw ExitCode.failure
-    }
-
-    // Initial build
-    log("Building site...")
-    guard swiftBuild() else {
-      log("Initial build failed.")
-      throw ExitCode.failure
-    }
-
-    let coordinator = DevCoordinator(productName: productName, cachePath: cachePath, port: port)
+    let coordinator = DevCoordinator(cachePath: cachePath, port: port)
     try coordinator.start()
   }
 }
 
 /// Manages the dev server lifecycle: site process, HTTP server, signal handling.
 private final class DevCoordinator: @unchecked Sendable {
-  let productName: String
   let cachePath: Path
   let port: Int
   var server: DevServer?
+
+  /// Resolved during startup, before the recompile handler is installed.
+  private var productName = ""
 
   /// State that shutdown and recompile both touch.
   private struct Lifecycle {
@@ -57,13 +46,24 @@ private final class DevCoordinator: @unchecked Sendable {
   /// an in-flight build.
   private let recompileQueue = DispatchQueue(label: "Saga.Recompile")
 
-  init(productName: String, cachePath: Path, port: Int) {
-    self.productName = productName
+  init(cachePath: Path, port: Int) {
     self.cachePath = cachePath
     self.port = port
   }
 
   func start() throws {
+    // Shutdown handling goes up before anything is spawned. Children get their own
+    // process group, so a Ctrl-C we don't handle ourselves kills only the CLI and
+    // leaves them running.
+    signal(SIGINT, SIG_IGN)
+    let sigintSrc = DispatchSource.makeSignalSource(signal: SIGINT, queue: DispatchQueue(label: "Saga.Shutdown"))
+    sigintSrc.setEventHandler { [weak self] in
+      print("\nShutting down...")
+      guard let self else { Foundation.exit(0) }
+      self.shutdown()
+    }
+    sigintSrc.resume()
+
     // Set up SIGUSR2 handler — Saga signals us when a content rebuild completes so we can reload browsers
     signal(SIGUSR2, SIG_IGN)
     let sigusr2Source = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: DispatchQueue(label: "Saga.Signal"))
@@ -74,12 +74,35 @@ private final class DevCoordinator: @unchecked Sendable {
     // can't race the launch below.
     signal(SIGUSR1, SIG_IGN)
 
+    // Find the executable product name from Package.swift
+    guard let productName = findExecutableProduct(onStart: { [weak self] in self?.track($0) }) else {
+      print("Could not find an executable product in Package.swift")
+      throw ExitCode.failure
+    }
+    self.productName = productName
+    lifecycle.withLock { $0.buildProcess = nil }
+
+    log("Building site...")
+    guard build() else {
+      log("Initial build failed.")
+      throw ExitCode.failure
+    }
+
     // Launch the site process. Saga watches its own files and rebuilds internally.
-    guard let siteProcess = launchSiteProcess(productName: productName, cachePath: cachePath) else {
+    // Registering it under the lock keeps shutdown from exiting between the two.
+    let (siteProcess, alreadyShuttingDown) = lifecycle.withLock { state -> (Process?, Bool) in
+      guard !state.shuttingDown else { return (nil, true) }
+      let process = launchSiteProcess(productName: productName, cachePath: cachePath)
+      state.siteProcess = process
+      return (process, false)
+    }
+    if alreadyShuttingDown {
+      dispatchMain()   // shutdown() is mid-flight and exits the process
+    }
+    guard let siteProcess else {
       log("Failed to launch site process.")
       throw ExitCode.failure
     }
-    lifecycle.withLock { $0.siteProcess = siteProcess }
 
     // Wait for the initial build to complete (SIGUSR2 or process exit)
     let initialBuild = DispatchSemaphore(value: 0)
@@ -125,54 +148,53 @@ private final class DevCoordinator: @unchecked Sendable {
     // Open the browser
     openBrowser(url: "http://localhost:\(port)/")
 
-    // Handle Ctrl+C shutdown
-    let sigintSrc = DispatchSource.makeSignalSource(signal: SIGINT, queue: DispatchQueue(label: "Saga.Shutdown"))
-    sigintSrc.setEventHandler { [weak self] in
-      print("\nShutting down...")
-      guard let self else { Foundation.exit(0) }
-
-      // Set the flag and read the processes in one step, so a recompile can't
-      // install a replacement we'd leave running.
-      let (site, build) = self.lifecycle.withLock { state -> (Process?, Process?) in
-        state.shuttingDown = true
-        return (state.siteProcess, state.buildProcess)
-      }
-
-      terminate(build)
-      terminate(site)
-      self.server?.stop()
-      Foundation.exit(0)
-    }
-    sigintSrc.resume()
-    signal(SIGINT, SIG_IGN)
-
     withExtendedLifetime((sigusr1Source, sigusr2Source, sigintSrc)) {
       dispatchMain()
     }
+  }
+
+  /// Kills whatever is running and exits. Safe to call more than once.
+  private func shutdown() {
+    // Set the flag and read the processes in one step, so a recompile can't
+    // install a replacement we'd leave running.
+    let processes = lifecycle.withLock { state -> (Process?, Process?)? in
+      guard !state.shuttingDown else { return nil }
+      state.shuttingDown = true
+      return (state.siteProcess, state.buildProcess)
+    }
+    guard let (site, build) = processes else { return }
+
+    terminate(build)
+    terminate(site)
+    server?.stop()
+    Foundation.exit(0)
+  }
+
+  /// Records a helper process so shutdown can interrupt it. Shutdown may have run
+  /// while the process was starting, in which case it found nothing to kill.
+  private func track(_ process: Process) {
+    let alreadyShuttingDown = lifecycle.withLock { state -> Bool in
+      state.buildProcess = process
+      return state.shuttingDown
+    }
+    if alreadyShuttingDown {
+      terminate(process)
+    }
+  }
+
+  /// Runs `swift build`, tracking the process so shutdown can interrupt it.
+  private func build() -> Bool {
+    let built = swiftBuild { [weak self] in self?.track($0) }
+    lifecycle.withLock { $0.buildProcess = nil }
+    return built
   }
 
   func recompileAndRelaunch() {
     guard !lifecycle.withLock({ $0.shuttingDown }) else { return }
 
     log("Source code changed, recompiling...")
-    let built = swiftBuild { [weak self] process in
-      guard let self else { return }
-      // Shutdown may have run while this build was starting, in which case it
-      // found no build process to kill.
-      let alreadyShuttingDown = self.lifecycle.withLock { state -> Bool in
-        state.buildProcess = process
-        return state.shuttingDown
-      }
-      if alreadyShuttingDown {
-        terminate(process)
-      }
-    }
-
-    let shuttingDown = lifecycle.withLock { state -> Bool in
-      state.buildProcess = nil
-      return state.shuttingDown
-    }
-    guard !shuttingDown else { return }
+    let built = build()
+    guard !lifecycle.withLock({ $0.shuttingDown }) else { return }
 
     guard built else {
       log("Build failed, waiting for next change...")
