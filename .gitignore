@@ -4,3 +4,6 @@
 /*.xcodeproj
 .swiftpm
 Package.resolved
+IntegrationTests/Fixture/.build
+IntegrationTests/Fixture/Sources/Fixture/Generated.swift
+IntegrationTests/Fixture/deploy
