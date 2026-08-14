@@ -382,23 +382,18 @@ enum ProjectTemplate {
 
     ## How it works
 
-    Saga runs a **Reader → Processor → Writer** pipeline. Every `register` step in `main.swift` claims
-    a folder of content, parses it into typed items, and hands those items to writers that render HTML:
+    Saga runs a **Reader → Processor → Writer** pipeline. Every `register` step in `main.swift` claims a folder of content, parses it into typed items, and hands those items to writers that render HTML:
 
-    - `content/articles/*.md` is read into `Item<ArticleMetadata>` values, and written to
-      `/articles/<slug>/`, plus an index at `/articles/` and a page per tag at `/articles/tag/<tag>/`.
+    - `content/articles/*.md` is read into `Item<ArticleMetadata>` values, and written to `/articles/<slug>/`, plus an index at `/articles/` and a page per tag at `/articles/tag/<tag>/`.
     - Every other markdown file is written as a standalone page, so `content/index.md` becomes `/`.
 
-    Metadata comes from the YAML front matter at the top of each markdown file. Add a field to
-    `ArticleMetadata` in `main.swift` to make it available in your templates.
+    Metadata comes from the YAML front matter at the top of each markdown file. Add a field to `ArticleMetadata` in `main.swift` to make it available in your templates.
 
     Anything in `content/static/` that no step claims is copied to `deploy/` untouched.
 
     ## Learn more
 
-    - [Documentation](https://getsaga.dev/docs/)
     - [Getting started](https://getsaga.dev/docs/gettingstarted/)
-    - [Architecture](https://getsaga.dev/docs/architecture/)
     - [Guides](https://getsaga.dev/docs/guides/) — search, sitemaps, syntax highlighting, Tailwind CSS, and more
     """
   }

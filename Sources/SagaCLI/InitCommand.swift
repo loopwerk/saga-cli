@@ -6,17 +6,37 @@ struct Init: ParsableCommand {
     abstract: "Create a new Saga project."
   )
 
-  @Argument(help: "The name of the project to create.")
+  @Argument(help: "The name of the project to create, or '.' to create it in the current folder.")
   var name: String
 
   func run() throws {
-    let projectPath = Path.current + name
+    let createInPlace = name == "."
+    let projectPath = createInPlace ? Path.current : Path.current + name
 
-    guard !projectPath.exists else {
-      throw ValidationError("Directory '\(name)' already exists.")
+    if !createInPlace {
+      guard !projectPath.exists else {
+        throw ValidationError("Directory '\(name)' already exists.")
+      }
     }
 
-    let capitalizedName = name.prefix(1).uppercased() + name.dropFirst()
+    let projectName = createInPlace ? projectPath.absolute().lastComponent : name
+
+    guard let firstCharacter = projectName.first, firstCharacter.isLetter || firstCharacter.isNumber else {
+      throw ValidationError("Could not determine a project name from the current folder.")
+    }
+
+    let capitalizedName = projectName.prefix(1).uppercased() + projectName.dropFirst()
+
+    let files: [(Path, String)] = [
+      (Path("Package.swift"), ProjectTemplate.packageSwift(name: capitalizedName)),
+      (Path("Sources") + capitalizedName + "main.swift", ProjectTemplate.mainSwift(name: capitalizedName)),
+      (Path("Sources") + capitalizedName + "templates.swift", ProjectTemplate.templatesSwift()),
+      (Path("content") + "index.md", ProjectTemplate.indexMarkdown()),
+      (Path("content") + "articles" + "hello-world.md", ProjectTemplate.helloWorldMarkdown()),
+      (Path("content") + "static" + "style.css", ProjectTemplate.styleCss()),
+      (Path("README.md"), ProjectTemplate.readme(name: capitalizedName)),
+      (Path(".gitignore"), ProjectTemplate.gitignore()),
+    ]
 
     // Create directory structure
     try (projectPath + "Sources" + capitalizedName).mkpath()
@@ -24,25 +44,16 @@ struct Init: ParsableCommand {
     try (projectPath + "content" + "static").mkpath()
 
     // Write files
-    let files: [(Path, String)] = [
-      (projectPath + "Package.swift", ProjectTemplate.packageSwift(name: capitalizedName)),
-      (projectPath + "Sources" + capitalizedName + "main.swift", ProjectTemplate.mainSwift(name: capitalizedName)),
-      (projectPath + "Sources" + capitalizedName + "templates.swift", ProjectTemplate.templatesSwift()),
-      (projectPath + "content" + "index.md", ProjectTemplate.indexMarkdown()),
-      (projectPath + "content" + "articles" + "hello-world.md", ProjectTemplate.helloWorldMarkdown()),
-      (projectPath + "content" + "static" + "style.css", ProjectTemplate.styleCss()),
-      (projectPath + "README.md", ProjectTemplate.readme(name: capitalizedName)),
-      (projectPath + ".gitignore", ProjectTemplate.gitignore()),
-    ]
-
     for (path, content) in files {
-      try path.write(content)
+      try (projectPath + path).write(content)
     }
 
-    print("Created new Saga project in '\(name)/'")
+    print("Created new Saga project in '\(createInPlace ? projectPath.absolute().lastComponent : name)/'")
     print("")
     print("Next steps:")
-    print("  cd \(name)")
+    if !createInPlace {
+      print("  cd \(name)")
+    }
     print("  saga dev")
   }
 }
