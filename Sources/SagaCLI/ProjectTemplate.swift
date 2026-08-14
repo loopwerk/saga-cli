@@ -17,6 +17,7 @@ enum ProjectTemplate {
         .package(url: "https://github.com/loopwerk/SagaParsleyMarkdownReader", from: "1.0.0"),
         .package(url: "https://github.com/loopwerk/SagaSwimRenderer", from: "1.0.0"),
         .package(url: "https://github.com/loopwerk/Moon", from: "1.0.0"),
+        .package(url: "https://github.com/loopwerk/Bonsai", from: "1.1.0"),
       ],
       targets: [
         .executableTarget(
@@ -26,6 +27,7 @@ enum ProjectTemplate {
             "SagaParsleyMarkdownReader",
             "SagaSwimRenderer",
             "Moon",
+            "Bonsai",
           ]
         ),
       ]
@@ -35,6 +37,7 @@ enum ProjectTemplate {
 
   static func mainSwift(name: String) -> String {
     """
+    import Bonsai
     import Foundation
     import Saga
     import SagaParsleyMarkdownReader
@@ -61,6 +64,11 @@ enum ProjectTemplate {
         readers: [.parsleyMarkdownReader],
         writers: [.itemWriter(swim(renderPage))]
       )
+      .postProcess { html, _ in
+        // postProcess runs on every generated file before it's written
+        guard !Saga.isDev else { return html }
+        return Bonsai.minifyHTML(html)
+      }
       .run()
     """
   }
@@ -79,7 +87,7 @@ enum ProjectTemplate {
           meta(charset: "utf-8")
           meta(content: "width=device-width, initial-scale=1", name: "viewport")
           title { pageTitle }
-          link(href: "/static/style.css", rel: "stylesheet")
+          link(href: Saga.hashed("/static/style.css"), rel: "stylesheet")
         }
         body {
           header {
@@ -336,6 +344,62 @@ enum ProjectTemplate {
       background: none;
       padding: 0;
     }
+    """
+  }
+
+  static func readme(name: String) -> String {
+    """
+    # \(name)
+
+    A static site built with [Saga](https://github.com/loopwerk/Saga), a code-first static site generator written in Swift.
+
+    ## Commands
+
+    Build the site, watch for changes, and serve it on http://localhost:3000 with auto-reload:
+
+    ```
+    $ saga dev
+    ```
+
+    Build the site once into `deploy/`:
+
+    ```
+    $ saga build
+    ```
+
+    ## Project structure
+
+    ```
+    Sources/\(name)/
+      main.swift        The pipeline: which content to read, and how to write it
+      templates.swift   The HTML templates, written in Swift using Swim
+    content/
+      index.md          The homepage
+      articles/         Markdown articles
+      static/           Files copied as-is: the stylesheet, images, ...
+    deploy/             The generated site
+    ```
+
+    ## How it works
+
+    Saga runs a **Reader → Processor → Writer** pipeline. Every `register` step in `main.swift` claims
+    a folder of content, parses it into typed items, and hands those items to writers that render HTML:
+
+    - `content/articles/*.md` is read into `Item<ArticleMetadata>` values, and written to
+      `/articles/<slug>/`, plus an index at `/articles/` and a page per tag at `/articles/tag/<tag>/`.
+    - Every other markdown file is written as a standalone page, so `content/index.md` becomes `/`.
+
+    Metadata comes from the YAML front matter at the top of each markdown file. Add a field to
+    `ArticleMetadata` in `main.swift` to make it available in your templates.
+
+    Anything in `content/static/` that no step claims is copied to `deploy/` untouched.
+
+    ## Learn more
+
+    - [Documentation](https://getsaga.dev/docs/)
+    - [Getting started](https://getsaga.dev/docs/gettingstarted/)
+    - [Architecture](https://getsaga.dev/docs/architecture/)
+    - [Guides](https://getsaga.dev/docs/guides/) — search, sitemaps, syntax highlighting, Tailwind CSS, and more
     """
   }
 

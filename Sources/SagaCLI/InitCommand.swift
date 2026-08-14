@@ -31,6 +31,7 @@ struct Init: ParsableCommand {
       (projectPath + "content" + "index.md", ProjectTemplate.indexMarkdown()),
       (projectPath + "content" + "articles" + "hello-world.md", ProjectTemplate.helloWorldMarkdown()),
       (projectPath + "content" + "static" + "style.css", ProjectTemplate.styleCss()),
+      (projectPath + "README.md", ProjectTemplate.readme(name: capitalizedName)),
       (projectPath + ".gitignore", ProjectTemplate.gitignore()),
     ]
 
