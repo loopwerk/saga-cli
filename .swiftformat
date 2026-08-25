@@ -3,3 +3,4 @@
 --patternlet inline
 --disable unusedArguments
 --disable redundantReturn
+--exclude .build,IntegrationTests/Fixture/Sources/Fixture/Generated.swift
