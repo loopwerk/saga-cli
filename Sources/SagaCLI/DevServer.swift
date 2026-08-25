@@ -17,8 +17,8 @@ final class DevServer: @unchecked Sendable {
   }
 
   func start() throws {
-    let outputPath = self.outputPath
-    let sseConnections = self.sseConnections
+    let outputPath = outputPath
+    let sseConnections = sseConnections
     let baseDir = FileManager.default.currentDirectoryPath
 
     let bootstrap = ServerBootstrap(group: group)
@@ -111,7 +111,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     // Static file serving
     let filePath = resolveFilePath(uri: uri)
 
-    guard let filePath = filePath,
+    guard let filePath,
           FileManager.default.fileExists(atPath: filePath),
           let data = FileManager.default.contents(atPath: filePath)
     else {
@@ -122,11 +122,10 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     let contentType = mimeType(for: filePath)
     let isHTML = contentType == "text/html"
 
-    var responseData: Data
-    if isHTML, let html = String(data: data, encoding: .utf8) {
-      responseData = Data(injectReloadScript(into: html).utf8)
+    var responseData: Data = if isHTML, let html = String(data: data, encoding: .utf8) {
+      Data(injectReloadScript(into: html).utf8)
     } else {
-      responseData = data
+      data
     }
 
     var headers = HTTPHeaders()
@@ -166,9 +165,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
     // Direct file match
     let directPath = outputPath + path
-    if fileManager.fileExists(atPath: directPath) {
-      var isDir: ObjCBool = false
-      fileManager.fileExists(atPath: directPath, isDirectory: &isDir)
+    var isDir: ObjCBool = false
+    if fileManager.fileExists(atPath: directPath, isDirectory: &isDir) {
       if !isDir.boolValue {
         return directPath
       }
@@ -220,11 +218,10 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
   }
 
   private func mimeType(for path: String) -> String {
-    let ext: String
-    if let dotIndex = path.lastIndex(of: ".") {
-      ext = String(path[path.index(after: dotIndex)...]).lowercased()
+    let ext = if let dotIndex = path.lastIndex(of: ".") {
+      String(path[path.index(after: dotIndex)...]).lowercased()
     } else {
-      ext = ""
+      ""
     }
     switch ext {
       case "html", "htm": return "text/html"
