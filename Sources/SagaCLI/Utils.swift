@@ -26,7 +26,8 @@ func log(_ message: String) {
 }
 
 /// Find the first executable product name using `swift package dump-package`.
-func findExecutableProduct() -> String? {
+/// `onStart` receives the process, so callers can interrupt it.
+func findExecutableProduct(onStart: ((Process) -> Void)? = nil) -> String? {
   let process = Process()
   process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
   process.arguments = ["swift", "package", "dump-package"]
@@ -38,6 +39,7 @@ func findExecutableProduct() -> String? {
 
   do {
     try process.run()
+    onStart?(process)
     process.waitUntilExit()
     guard process.terminationStatus == 0 else { return nil }
 
@@ -74,7 +76,8 @@ func findExecutableProduct() -> String? {
   }
 }
 
-func swiftBuild() -> Bool {
+/// Runs `swift build`. `onStart` receives the process, so callers can interrupt it.
+func swiftBuild(onStart: ((Process) -> Void)? = nil) -> Bool {
   let process = Process()
   process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
   process.arguments = ["swift", "build"]
@@ -83,11 +86,30 @@ func swiftBuild() -> Bool {
 
   do {
     try process.run()
+    onStart?(process)
     process.waitUntilExit()
     return process.terminationStatus == 0
   } catch {
     print("Build error: \(error)")
     return false
+  }
+}
+
+/// Terminates `process`, escalating to SIGKILL after `timeout`. Shutdown runs with
+/// SIGINT ignored, so waiting forever on a child that blocks SIGTERM would leave the
+/// CLI unkillable from its own terminal.
+func terminate(_ process: Process?, timeout: TimeInterval = 5) {
+  guard let process, process.isRunning else { return }
+  process.terminate()
+
+  let deadline = Date().addingTimeInterval(timeout)
+  while process.isRunning, Date() < deadline {
+    Thread.sleep(forTimeInterval: 0.01)
+  }
+
+  if process.isRunning {
+    kill(process.processIdentifier, SIGKILL)
+    process.waitUntilExit()
   }
 }
 

@@ -1,6 +1,7 @@
 import ArgumentParser
 import Foundation
 import SagaPathKit
+import os
 
 struct Dev: ParsableCommand {
   static let configuration = CommandConfiguration(
@@ -18,75 +19,113 @@ struct Dev: ParsableCommand {
     }
     try cachePath.mkpath()
 
-    // Find the executable product name from Package.swift
-    guard let productName = findExecutableProduct() else {
-      print("Could not find an executable product in Package.swift")
-      throw ExitCode.failure
-    }
-
-    // Initial build
-    log("Building site...")
-    guard swiftBuild() else {
-      log("Initial build failed.")
-      throw ExitCode.failure
-    }
-
-    let coordinator = DevCoordinator(productName: productName, cachePath: cachePath, port: port)
+    let coordinator = DevCoordinator(cachePath: cachePath, port: port)
     try coordinator.start()
   }
 }
 
 /// Manages the dev server lifecycle: site process, HTTP server, signal handling.
 private final class DevCoordinator: @unchecked Sendable {
-  let productName: String
   let cachePath: Path
   let port: Int
-  var siteProcess: Process?
   var server: DevServer?
 
-  init(productName: String, cachePath: Path, port: Int) {
-    self.productName = productName
+  /// Resolved during startup, before the recompile handler is installed.
+  private var productName = ""
+
+  /// State that shutdown and recompile both touch.
+  private struct Lifecycle {
+    var siteProcess: Process?
+    var buildProcess: Process?
+    var shuttingDown = false
+  }
+
+  private let lifecycle = OSAllocatedUnfairLock(initialState: Lifecycle())
+
+  /// Serializes recompiles. Shutdown never uses this, so Ctrl-C doesn't wait on
+  /// an in-flight build.
+  private let recompileQueue = DispatchQueue(label: "Saga.Recompile")
+
+  init(cachePath: Path, port: Int) {
     self.cachePath = cachePath
     self.port = port
   }
 
   func start() throws {
+    // Shutdown handling goes up before anything is spawned. Children get their own
+    // process group, so a Ctrl-C we don't handle ourselves kills only the CLI and
+    // leaves them running.
+    signal(SIGINT, SIG_IGN)
+    let sigintSrc = DispatchSource.makeSignalSource(signal: SIGINT, queue: DispatchQueue(label: "Saga.Shutdown"))
+    sigintSrc.setEventHandler { [weak self] in
+      print("\nShutting down...")
+      guard let self else { Foundation.exit(0) }
+      self.shutdown()
+    }
+    sigintSrc.resume()
+
     // Set up SIGUSR2 handler — Saga signals us when a content rebuild completes so we can reload browsers
     signal(SIGUSR2, SIG_IGN)
     let sigusr2Source = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: DispatchQueue(label: "Saga.Signal"))
     sigusr2Source.setEventHandler { [weak self] in self?.server?.sendReload() }
     sigusr2Source.resume()
 
-    // Set up SIGUSR1 handler — Saga signals us when Swift source files change so we can recompile
+    // The recompile handler is installed after startup, so a source change now
+    // can't race the launch below.
     signal(SIGUSR1, SIG_IGN)
-    let sigusr1Source = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: DispatchQueue(label: "Saga.Recompile"))
-    sigusr1Source.setEventHandler { [weak self] in self?.recompileAndRelaunch() }
-    sigusr1Source.resume()
+
+    // Find the executable product name from Package.swift
+    guard let productName = findExecutableProduct(onStart: { [weak self] in self?.track($0) }) else {
+      print("Could not find an executable product in Package.swift")
+      throw ExitCode.failure
+    }
+    self.productName = productName
+    lifecycle.withLock { $0.buildProcess = nil }
+
+    log("Building site...")
+    guard build() else {
+      log("Initial build failed.")
+      throw ExitCode.failure
+    }
 
     // Launch the site process. Saga watches its own files and rebuilds internally.
-    siteProcess = launchSiteProcess(productName: productName, cachePath: cachePath)
-    guard siteProcess != nil else {
+    // Registering it under the lock keeps shutdown from exiting between the two.
+    let (siteProcess, alreadyShuttingDown) = lifecycle.withLock { state -> (Process?, Bool) in
+      guard !state.shuttingDown else { return (nil, true) }
+      let process = launchSiteProcess(productName: productName, cachePath: cachePath)
+      state.siteProcess = process
+      return (process, false)
+    }
+    if alreadyShuttingDown {
+      dispatchMain()   // shutdown() is mid-flight and exits the process
+    }
+    guard let siteProcess else {
       log("Failed to launch site process.")
       throw ExitCode.failure
     }
 
     // Wait for the initial build to complete (SIGUSR2 or process exit)
     let initialBuild = DispatchSemaphore(value: 0)
-    siteProcess?.terminationHandler = { _ in initialBuild.signal() }
+    siteProcess.terminationHandler = { _ in initialBuild.signal() }
     let initialSigusr2 = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: DispatchQueue(label: "Saga.InitialBuild"))
     initialSigusr2.setEventHandler { initialBuild.signal() }
     initialSigusr2.resume()
     initialBuild.wait()
     initialSigusr2.cancel()
-    siteProcess?.terminationHandler = nil
+    siteProcess.terminationHandler = nil
 
     // Read the config file written by Saga to detect output path.
     // If the config file doesn't exist, this is a Saga 2 site which is not supported.
     guard let config = readSagaConfig() else {
       log("This version of saga-cli requires Saga 3.x or later.")
-      siteProcess?.terminate()
+      terminate(siteProcess)
       throw ExitCode.failure
     }
+
+    // Set up SIGUSR1 handler — Saga signals us when Swift source files change so we can recompile
+    let sigusr1Source = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: recompileQueue)
+    sigusr1Source.setEventHandler { [weak self] in self?.recompileAndRelaunch() }
+    sigusr1Source.resume()
 
     // Start the dev server
     let devServer = DevServer(outputPath: config.output, port: port)
@@ -109,33 +148,67 @@ private final class DevCoordinator: @unchecked Sendable {
     // Open the browser
     openBrowser(url: "http://localhost:\(port)/")
 
-    // Handle Ctrl+C shutdown
-    let sigintSrc = DispatchSource.makeSignalSource(signal: SIGINT, queue: DispatchQueue(label: "Saga.Signals"))
-    sigintSrc.setEventHandler { [weak self] in
-      print("\nShutting down...")
-      self?.siteProcess?.terminate()
-      self?.server?.stop()
-      Foundation.exit(0)
-    }
-    sigintSrc.resume()
-    signal(SIGINT, SIG_IGN)
-
     withExtendedLifetime((sigusr1Source, sigusr2Source, sigintSrc)) {
       dispatchMain()
     }
   }
 
+  /// Kills whatever is running and exits. Safe to call more than once.
+  private func shutdown() {
+    // Set the flag and read the processes in one step, so a recompile can't
+    // install a replacement we'd leave running.
+    let processes = lifecycle.withLock { state -> (Process?, Process?)? in
+      guard !state.shuttingDown else { return nil }
+      state.shuttingDown = true
+      return (state.siteProcess, state.buildProcess)
+    }
+    guard let (site, build) = processes else { return }
+
+    terminate(build)
+    terminate(site)
+    server?.stop()
+    Foundation.exit(0)
+  }
+
+  /// Records a helper process so shutdown can interrupt it. Shutdown may have run
+  /// while the process was starting, in which case it found nothing to kill.
+  private func track(_ process: Process) {
+    let alreadyShuttingDown = lifecycle.withLock { state -> Bool in
+      state.buildProcess = process
+      return state.shuttingDown
+    }
+    if alreadyShuttingDown {
+      terminate(process)
+    }
+  }
+
+  /// Runs `swift build`, tracking the process so shutdown can interrupt it.
+  private func build() -> Bool {
+    let built = swiftBuild { [weak self] in self?.track($0) }
+    lifecycle.withLock { $0.buildProcess = nil }
+    return built
+  }
+
   func recompileAndRelaunch() {
+    guard !lifecycle.withLock({ $0.shuttingDown }) else { return }
+
     log("Source code changed, recompiling...")
-    guard swiftBuild() else {
+    let built = build()
+    guard !lifecycle.withLock({ $0.shuttingDown }) else { return }
+
+    guard built else {
       log("Build failed, waiting for next change...")
       return
     }
 
-    // Build succeeded — kill old process and launch new one
-    siteProcess?.terminate()
-    siteProcess?.waitUntilExit()
+    // Shutdown may hold this same process, but terminate() is safe to call twice.
+    terminate(lifecycle.withLock { $0.siteProcess })
 
-    siteProcess = launchSiteProcess(productName: productName, cachePath: cachePath)
+    // One step, or shutdown could exit between the check and the launch and
+    // orphan the new process.
+    lifecycle.withLock { state in
+      guard !state.shuttingDown else { return }
+      state.siteProcess = launchSiteProcess(productName: productName, cachePath: cachePath)
+    }
   }
 }
