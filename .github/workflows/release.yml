@@ -6,12 +6,48 @@ on:
       - "*"
 
 jobs:
-  create-release:
-    runs-on: ubuntu-latest
+  build-macos:
+    runs-on: macos-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Build universal binary
+        run: swift build -c release --arch arm64 --arch x86_64 --product saga
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp .build/apple/Products/Release/saga dist/saga
+          tar -czf saga-macos-universal.tar.gz -C dist saga
+          shasum -a 256 saga-macos-universal.tar.gz | awk '{print $1}' > saga-macos-universal.tar.gz.sha256
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-universal
+          path: |
+            saga-macos-universal.tar.gz
+            saga-macos-universal.tar.gz.sha256
+
+  create-release:
+    runs-on: ubuntu-latest
+    needs: build-macos
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
 
       - name: Create changelog text
         id: changelog
@@ -26,3 +62,20 @@ jobs:
         with:
           body: ${{ steps.changelog.outputs.changes }}
           token: ${{ secrets.GITHUB_TOKEN }}
+          files: artifacts/*
+
+  update-homebrew-tap:
+    runs-on: ubuntu-latest
+    needs: create-release
+
+    steps:
+      - name: Dispatch to homebrew-tap
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          repository: loopwerk/homebrew-tap
+          event-type: update-saga-tap
+          client-payload: |
+            {
+              "version": "${{ github.ref_name }}"
+            }
