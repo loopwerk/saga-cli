@@ -1,42 +1,52 @@
+import FlyingFox
+import FlyingSocks
 import Foundation
-import NIOCore
-import NIOHTTP1
-import NIOPosix
 
 final class DevServer: @unchecked Sendable {
-  private let outputPath: String
-  private let port: Int
-  private let group: MultiThreadedEventLoopGroup
-  private var channel: Channel?
+  private let server: HTTPServer
   private let sseConnections = SSEConnectionStore()
+  private var task: Task<Void, Never>?
 
-  init(outputPath: String, port: Int) {
-    self.outputPath = outputPath
-    self.port = port
-    group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+  init(outputPath: String, port: Int) throws {
+    let root = FileManager.default.currentDirectoryPath + "/" + outputPath
+    server = try HTTPServer(
+      address: .inet(ip4: "127.0.0.1", port: UInt16(port)),
+      handler: RequestHandler(outputPath: root, sseConnections: sseConnections)
+    )
   }
 
+  /// Returns once the server is accepting connections, so the caller can print
+  /// its address and open a browser without racing the bind.
   func start() throws {
-    let outputPath = outputPath
-    let sseConnections = sseConnections
-    let baseDir = FileManager.default.currentDirectoryPath
+    let listening = DispatchSemaphore(value: 0)
+    let outcome = Locked(initialState: Error?.none)
 
-    let bootstrap = ServerBootstrap(group: group)
-      .serverChannelOption(ChannelOptions.backlog, value: 256)
-      .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-      .childChannelInitializer { channel in
-        channel.pipeline.configureHTTPServerPipeline().flatMap {
-          channel.pipeline.addHandler(HTTPHandler(outputPath: baseDir + "/" + outputPath, sseConnections: sseConnections))
-        }
+    task = Task { [server] in
+      do {
+        try await server.run()
+      } catch {
+        outcome.withLock { $0 = error }
+        listening.signal()
       }
+    }
 
-    channel = try bootstrap.bind(host: "127.0.0.1", port: port).wait()
-    try channel?.closeFuture.wait()
+    Task { [server] in
+      do {
+        try await server.waitUntilListening()
+      } catch {
+        outcome.withLock { $0 = error }
+      }
+      listening.signal()
+    }
+
+    listening.wait()
+    if let error = outcome.withLock({ $0 }) {
+      throw error
+    }
   }
 
   func stop() {
-    try? channel?.close().wait()
-    try? group.syncShutdownGracefully()
+    task?.cancel()
   }
 
   func sendReload() {
@@ -44,119 +54,72 @@ final class DevServer: @unchecked Sendable {
   }
 }
 
+/// Open `/_reload` streams. Reloads are broadcast from a signal handler, so
+/// `sendReload` has to be callable from outside the server's tasks.
 final class SSEConnectionStore: @unchecked Sendable {
-  private var connections: [Channel] = []
-  private let lock = NSLock()
+  private let connections = Locked(initialState: [UUID: AsyncStream<[UInt8]>.Continuation]())
 
-  func add(_ channel: Channel) {
-    lock.lock()
-    connections.append(channel)
-    lock.unlock()
+  func add(_ continuation: AsyncStream<[UInt8]>.Continuation, id: UUID) {
+    connections.withLock { $0[id] = continuation }
   }
 
-  func remove(_ channel: Channel) {
-    lock.lock()
-    connections.removeAll { $0 === channel }
-    lock.unlock()
+  func remove(id: UUID) {
+    connections.withLock { $0[id] = nil }
   }
 
   func sendReload() {
-    lock.lock()
-    let current = connections
-    lock.unlock()
-
-    for channel in current {
-      var buffer = channel.allocator.buffer(capacity: 64)
-      buffer.writeString("data: reload\n\n")
-      channel.writeAndFlush(HTTPServerResponsePart.body(.byteBuffer(buffer)), promise: nil)
+    let current = connections.withLock { Array($0.values) }
+    for continuation in current {
+      continuation.yield(Array("data: reload\n\n".utf8))
     }
   }
 }
 
-private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
-  typealias InboundIn = HTTPServerRequestPart
-  typealias OutboundOut = HTTPServerResponsePart
+private struct RequestHandler: HTTPHandler {
+  let outputPath: String
+  let sseConnections: SSEConnectionStore
 
-  private let outputPath: String
-  private let sseConnections: SSEConnectionStore
-  private var requestURI: String = "/"
-
-  init(outputPath: String, sseConnections: SSEConnectionStore) {
-    self.outputPath = outputPath
-    self.sseConnections = sseConnections
-  }
-
-  func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-    let part = unwrapInboundIn(data)
-
-    switch part {
-      case .head(let request):
-        requestURI = request.uri
-
-      case .body:
-        break
-
-      case .end:
-        handleRequest(uri: requestURI, context: context)
-    }
-  }
-
-  private func handleRequest(uri: String, context: ChannelHandlerContext) {
-    // SSE endpoint for auto-reload
-    if uri == "/_reload" {
-      handleSSE(context: context)
-      return
+  func handleRequest(_ request: HTTPRequest) async throws -> HTTPResponse {
+    if request.path == "/_reload" {
+      return sseResponse()
     }
 
-    // Static file serving
-    let filePath = resolveFilePath(uri: uri)
-
-    guard let filePath,
-          FileManager.default.fileExists(atPath: filePath),
+    guard let filePath = resolveFilePath(uri: request.path),
           let data = FileManager.default.contents(atPath: filePath)
     else {
-      sendNotFound(context: context)
-      return
+      return HTTPResponse(
+        statusCode: .notFound,
+        headers: [.contentType: "text/plain"],
+        body: Data("404 Not Found".utf8)
+      )
     }
 
     let contentType = mimeType(for: filePath)
-    let isHTML = contentType == "text/html"
-
-    var responseData: Data = if isHTML, let html = String(data: data, encoding: .utf8) {
-      Data(injectReloadScript(into: html).utf8)
-    } else {
-      data
+    var body = data
+    if contentType == "text/html", let html = String(data: data, encoding: .utf8) {
+      body = Data(injectReloadScript(into: html).utf8)
     }
 
-    var headers = HTTPHeaders()
-    headers.add(name: "Content-Type", value: contentType)
-    headers.add(name: "Content-Length", value: "\(responseData.count)")
-    headers.add(name: "Cache-Control", value: "no-cache")
-
-    let head = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
-    context.write(wrapOutboundOut(.head(head)), promise: nil)
-
-    var buffer = context.channel.allocator.buffer(capacity: responseData.count)
-    buffer.writeBytes(responseData)
-    context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
-    context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+    return HTTPResponse(
+      statusCode: .ok,
+      headers: [.contentType: contentType, .cacheControl: "no-cache"],
+      body: body
+    )
   }
 
-  private func handleSSE(context: ChannelHandlerContext) {
-    var headers = HTTPHeaders()
-    headers.add(name: "Content-Type", value: "text/event-stream")
-    headers.add(name: "Cache-Control", value: "no-cache")
-    headers.add(name: "Connection", value: "keep-alive")
+  private func sseResponse() -> HTTPResponse {
+    let id = UUID()
+    let (stream, continuation) = AsyncStream<[UInt8]>.makeStream()
+    let connections = sseConnections
+    continuation.onTermination = { _ in connections.remove(id: id) }
+    connections.add(continuation, id: id)
 
-    let head = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
-    context.writeAndFlush(wrapOutboundOut(.head(head)), promise: nil)
-
-    let channel = context.channel
-    sseConnections.add(channel)
-
-    channel.closeFuture.whenComplete { [weak self] _ in
-      self?.sseConnections.remove(channel)
-    }
+    // No Content-Length, so the body is chunked and the connection stays open.
+    return HTTPResponse(
+      statusCode: .ok,
+      headers: [.contentType: "text/event-stream", .cacheControl: "no-cache"],
+      body: HTTPBodySequence(from: SSEBody(stream: stream))
+    )
   }
 
   private func resolveFilePath(uri: String) -> String? {
@@ -190,21 +153,6 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     return nil
-  }
-
-  private func sendNotFound(context: ChannelHandlerContext) {
-    let body = "404 Not Found"
-    var headers = HTTPHeaders()
-    headers.add(name: "Content-Type", value: "text/plain")
-    headers.add(name: "Content-Length", value: "\(body.utf8.count)")
-
-    let head = HTTPResponseHead(version: .http1_1, status: .notFound, headers: headers)
-    context.write(wrapOutboundOut(.head(head)), promise: nil)
-
-    var buffer = context.channel.allocator.buffer(capacity: body.utf8.count)
-    buffer.writeString(body)
-    context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
-    context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
   }
 
   private func injectReloadScript(into html: String) -> String {
@@ -242,6 +190,45 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
       case "pdf": return "application/pdf"
       case "txt": return "text/plain"
       default: return "application/octet-stream"
+    }
+  }
+}
+
+/// Adapts an `AsyncStream` of byte chunks to the buffered sequence FlyingFox
+/// streams response bodies from. The concrete adapters it ships are
+/// package-internal, so this fills that gap.
+private struct SSEBody: AsyncBufferedSequence {
+  typealias Element = UInt8
+
+  let stream: AsyncStream<[UInt8]>
+
+  func makeAsyncIterator() -> Iterator {
+    Iterator(inner: stream.makeAsyncIterator())
+  }
+
+  struct Iterator: AsyncBufferedIteratorProtocol {
+    var inner: AsyncStream<[UInt8]>.Iterator
+    private var pending: [UInt8] = []
+
+    init(inner: AsyncStream<[UInt8]>.Iterator) {
+      self.inner = inner
+    }
+
+    mutating func nextBuffer(suggested count: Int) async throws -> [UInt8]? {
+      if !pending.isEmpty {
+        let buffer = pending
+        pending = []
+        return buffer
+      }
+      return await inner.next()
+    }
+
+    mutating func next() async throws -> UInt8? {
+      if pending.isEmpty {
+        guard let chunk = await inner.next() else { return nil }
+        pending = chunk
+      }
+      return pending.isEmpty ? nil : pending.removeFirst()
     }
   }
 }
