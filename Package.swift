@@ -13,7 +13,7 @@ let package = Package(
   dependencies: [
     .package(url: "https://github.com/loopwerk/SagaPathKit", from: "1.4.0"),
     .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
-    .package(url: "https://github.com/apple/swift-nio", from: "2.65.0"),
+    .package(url: "https://github.com/swhitty/FlyingFox", from: "0.27.0"),
   ],
   targets: [
     .executableTarget(
@@ -21,9 +21,8 @@ let package = Package(
       dependencies: [
         "SagaPathKit",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
-        .product(name: "NIOCore", package: "swift-nio"),
-        .product(name: "NIOPosix", package: "swift-nio"),
-        .product(name: "NIOHTTP1", package: "swift-nio"),
+        .product(name: "FlyingFox", package: "FlyingFox"),
+        .product(name: "FlyingSocks", package: "FlyingFox"),
       ]
     ),
   ]

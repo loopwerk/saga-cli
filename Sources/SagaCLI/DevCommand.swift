@@ -127,21 +127,16 @@ private final class DevCoordinator: @unchecked Sendable {
     sigusr1Source.resume()
 
     // Start the dev server
-    let devServer = DevServer(outputPath: config.output, port: port)
+    let devServer = try DevServer(outputPath: config.output, port: port)
     server = devServer
 
-    let serverQueue = DispatchQueue(label: "Saga.DevServer")
-    serverQueue.async {
-      do {
-        try devServer.start()
-      } catch {
-        print("Failed to start server: \(error)")
-        Foundation.exit(1)
-      }
+    do {
+      try devServer.start()
+    } catch {
+      print("Failed to start server: \(error)")
+      Foundation.exit(1)
     }
 
-    // Give the server a moment to start
-    Thread.sleep(forTimeInterval: 0.5)
     log("Development server running at http://localhost:\(port)/")
 
     // Open the browser
