@@ -1,7 +1,6 @@
 import ArgumentParser
 import Foundation
 import SagaPathKit
-import os
 
 struct Dev: ParsableCommand {
   static let configuration = CommandConfiguration(
@@ -40,7 +39,7 @@ private final class DevCoordinator: @unchecked Sendable {
     var shuttingDown = false
   }
 
-  private let lifecycle = OSAllocatedUnfairLock(initialState: Lifecycle())
+  private let lifecycle = Locked(initialState: Lifecycle())
 
   /// Serializes recompiles. Shutdown never uses this, so Ctrl-C doesn't wait on
   /// an in-flight build.
@@ -60,7 +59,7 @@ private final class DevCoordinator: @unchecked Sendable {
     sigintSrc.setEventHandler { [weak self] in
       print("\nShutting down...")
       guard let self else { Foundation.exit(0) }
-      self.shutdown()
+      shutdown()
     }
     sigintSrc.resume()
 
@@ -97,7 +96,7 @@ private final class DevCoordinator: @unchecked Sendable {
       return (process, false)
     }
     if alreadyShuttingDown {
-      dispatchMain()   // shutdown() is mid-flight and exits the process
+      dispatchMain() // shutdown() is mid-flight and exits the process
     }
     guard let siteProcess else {
       log("Failed to launch site process.")

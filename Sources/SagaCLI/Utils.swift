@@ -145,3 +145,20 @@ func openBrowser(url: String) {
     try? process.run()
   #endif
 }
+
+/// State that can only be reached while its lock is held. Used instead of
+/// `OSAllocatedUnfairLock`, which doesn't exist on Linux.
+final class Locked<State>: @unchecked Sendable {
+  private var state: State
+  private let lock = NSLock()
+
+  init(initialState: State) {
+    state = initialState
+  }
+
+  func withLock<R>(_ body: (inout State) throws -> R) rethrows -> R {
+    lock.lock()
+    defer { lock.unlock() }
+    return try body(&state)
+  }
+}
