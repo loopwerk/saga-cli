@@ -59,6 +59,13 @@ $ saga dev
 $ saga dev --port 8080
 ```
 
+The site opens in your default browser. To use a different one, set `BROWSER` to its name, and optionally `BROWSER_ARGS` to extra arguments for it. Set `BROWSER=none` to not open a browser at all.
+
+```
+$ BROWSER=Firefox saga dev
+$ BROWSER="Google Chrome" BROWSER_ARGS="--incognito" saga dev
+```
+
 > **Note:** saga-cli 2.x requires Saga 3.x or later.
 
 ## Requirements

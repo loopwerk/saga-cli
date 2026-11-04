@@ -135,15 +135,35 @@ func launchSiteProcess(productName: String, cachePath: Path) -> Process? {
   }
 }
 
+/// Opens `url` in the default browser, or in the one named by `BROWSER` (with
+/// `BROWSER_ARGS` passed to it), following Vite's conventions. `BROWSER=none`
+/// disables opening.
 func openBrowser(url: String) {
+  let env = ProcessInfo.processInfo.environment
+  let browser = env["BROWSER"] ?? ""
+  let browserArgs = (env["BROWSER_ARGS"] ?? "").split(separator: " ").map(String.init)
+
+  if browser.lowercased() == "none" {
+    return
+  }
+
+  let process = Process()
+
   #if os(macOS)
-    Process.launchedProcess(launchPath: "/usr/bin/open", arguments: [url])
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+    // "open" means the system default, as in Vite.
+    if browser.isEmpty || browser == "open" {
+      process.arguments = [url]
+    } else {
+      // macOS only hands --args to the app if this call launches it.
+      process.arguments = ["-a", browser, url] + (browserArgs.isEmpty ? [] : ["--args"] + browserArgs)
+    }
   #elseif os(Linux)
-    let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-    process.arguments = ["xdg-open", url]
-    try? process.run()
+    process.arguments = browser.isEmpty ? ["xdg-open", url] : [browser] + browserArgs + [url]
   #endif
+
+  try? process.run()
 }
 
 /// State that can only be reached while its lock is held. Used instead of
